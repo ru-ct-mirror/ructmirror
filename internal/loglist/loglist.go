@@ -8,7 +8,7 @@ import (
 
 	"github.com/google/certificate-transparency-go/loglist3"
 
-	"github.com/ru-ct-mirror/ru-ct-mirror/internal/config"
+	"github.com/ru-ct-mirror/ructmirror/internal/config"
 )
 
 // Diff describes how the published list disagrees with logs.json.

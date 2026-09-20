@@ -9,7 +9,7 @@ import (
 	"github.com/google/certificate-transparency-go/tls"
 	"github.com/google/certificate-transparency-go/x509"
 
-	"github.com/ru-ct-mirror/ru-ct-mirror/internal/store"
+	"github.com/ru-ct-mirror/ructmirror/internal/store"
 )
 
 // LeafInfo is what a summary needs from one log entry.

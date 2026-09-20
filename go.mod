@@ -1,4 +1,4 @@
-module github.com/ru-ct-mirror/ru-ct-mirror
+module github.com/ru-ct-mirror/ructmirror
 
 go 1.26.5
 

@@ -4,7 +4,7 @@ import (
 	"encoding/base64"
 	"os"
 
-	"github.com/ru-ct-mirror/ru-ct-mirror/internal/store"
+	"github.com/ru-ct-mirror/ructmirror/internal/store"
 )
 
 func removeChunk(c store.Chunk) error { return os.Remove(c.Path) }

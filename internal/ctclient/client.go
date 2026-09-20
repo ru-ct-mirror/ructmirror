@@ -17,7 +17,7 @@ import (
 
 	ct "github.com/google/certificate-transparency-go"
 
-	"github.com/ru-ct-mirror/ru-ct-mirror/internal/config"
+	"github.com/ru-ct-mirror/ructmirror/internal/config"
 )
 
 const userAgent = "ru-ct-mirror (+https://github.com/ru-ct-mirror/ru-ct-mirror)"

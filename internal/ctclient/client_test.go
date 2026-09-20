@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ru-ct-mirror/ru-ct-mirror/internal/config"
+	"github.com/ru-ct-mirror/ructmirror/internal/config"
 )
 
 func TestPinnedModeRejectsForeignCertificate(t *testing.T) {
@@ -19,8 +19,10 @@ func TestPinnedModeRejectsForeignCertificate(t *testing.T) {
 	defer srv.Close()
 	roots := t.TempDir()
 	// Use the real pinned roots so the test exercises the production pool.
+	// testdata holds copies of the anchors the mirror repository pins in
+	// roots/; the run itself reads that directory, not these.
 	for _, f := range []string{"russian_trusted_root_ca.pem", "russian_trusted_sub_ca_2024.pem"} {
-		b, err := os.ReadFile(filepath.Join("..", "..", "roots", f))
+		b, err := os.ReadFile(filepath.Join("testdata", f))
 		if err != nil {
 			t.Fatal(err)
 		}

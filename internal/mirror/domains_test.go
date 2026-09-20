@@ -6,7 +6,7 @@ import (
 
 	ct "github.com/google/certificate-transparency-go"
 
-	"github.com/ru-ct-mirror/ru-ct-mirror/internal/store"
+	"github.com/ru-ct-mirror/ructmirror/internal/store"
 )
 
 func TestDomainsAggregatesSANsAndCN(t *testing.T) {

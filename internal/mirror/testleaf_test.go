@@ -15,7 +15,7 @@ import (
 	"github.com/google/certificate-transparency-go/tls"
 	ctx509 "github.com/google/certificate-transparency-go/x509"
 
-	"github.com/ru-ct-mirror/ru-ct-mirror/internal/store"
+	"github.com/ru-ct-mirror/ructmirror/internal/store"
 )
 
 // testCA signs the certificates the tests put into leaves. The issuer name is

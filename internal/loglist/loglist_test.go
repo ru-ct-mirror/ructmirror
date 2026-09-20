@@ -3,7 +3,7 @@ package loglist
 import (
 	"testing"
 
-	"github.com/ru-ct-mirror/ru-ct-mirror/internal/config"
+	"github.com/ru-ct-mirror/ructmirror/internal/config"
 )
 
 const sample = `{"version":"1.0","log_list_timestamp":"2026-01-01T00:00:00Z","operators":[{"name":"Yandex","email":["x@y"],"logs":[

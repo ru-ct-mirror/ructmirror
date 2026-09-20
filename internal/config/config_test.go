@@ -7,8 +7,14 @@ import (
 	"time"
 )
 
+// testdata/logs.json is a frozen copy of the file the mirror repository
+// keeps at its root, so this exercises Load against a whole real list:
+// every key parses and every log_id is the SHA-256 of its key. The live
+// file stays with the data, where Load reads it on every run, so a shard
+// added there and not copied here cannot break this test — refresh the
+// copy when the shape of the file changes, not on every new shard.
 func TestLoadRealLogsJSON(t *testing.T) {
-	f, err := Load(filepath.Join("..", "..", "logs.json"))
+	f, err := Load(filepath.Join("testdata", "logs.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

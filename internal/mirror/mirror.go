@@ -15,9 +15,9 @@ import (
 	"github.com/transparency-dev/merkle/proof"
 	"github.com/transparency-dev/merkle/rfc6962"
 
-	"github.com/ru-ct-mirror/ru-ct-mirror/internal/config"
-	"github.com/ru-ct-mirror/ru-ct-mirror/internal/ctclient"
-	"github.com/ru-ct-mirror/ru-ct-mirror/internal/store"
+	"github.com/ru-ct-mirror/ructmirror/internal/config"
+	"github.com/ru-ct-mirror/ructmirror/internal/ctclient"
+	"github.com/ru-ct-mirror/ructmirror/internal/store"
 )
 
 // Options tunes a sync run.

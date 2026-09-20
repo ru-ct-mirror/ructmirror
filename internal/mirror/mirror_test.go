@@ -22,9 +22,9 @@ import (
 	"github.com/transparency-dev/merkle/compact"
 	"github.com/transparency-dev/merkle/proof"
 
-	"github.com/ru-ct-mirror/ru-ct-mirror/internal/config"
-	"github.com/ru-ct-mirror/ru-ct-mirror/internal/ctclient"
-	"github.com/ru-ct-mirror/ru-ct-mirror/internal/store"
+	"github.com/ru-ct-mirror/ructmirror/internal/config"
+	"github.com/ru-ct-mirror/ructmirror/internal/ctclient"
+	"github.com/ru-ct-mirror/ructmirror/internal/store"
 )
 
 // fakeLog is an in-memory RFC 6962 log that can be told to misbehave.

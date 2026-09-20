@@ -1,0 +1,29 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # Pinned for the same reason the actions are pinned to commit SHAs, and
+    # to the same image the mirror runs on: this code is judged by whether it
+    # works there. Bump both together.
+    # https://github.com/actions/runner-images
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test ./...
+      # The mirror builds the binary rather than using `go run`, because
+      # `go run` collapses every non-zero exit status to 1 and the workflow
+      # there tells 2 (verification failure) from 1 (unreachable log).
+      - run: go build -o ructmirror ./cmd/ructmirror

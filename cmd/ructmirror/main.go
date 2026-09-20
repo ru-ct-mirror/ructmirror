@@ -31,11 +31,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ru-ct-mirror/ru-ct-mirror/internal/config"
-	"github.com/ru-ct-mirror/ru-ct-mirror/internal/ctclient"
-	"github.com/ru-ct-mirror/ru-ct-mirror/internal/loglist"
-	"github.com/ru-ct-mirror/ru-ct-mirror/internal/mirror"
-	"github.com/ru-ct-mirror/ru-ct-mirror/internal/store"
+	"github.com/ru-ct-mirror/ructmirror/internal/config"
+	"github.com/ru-ct-mirror/ructmirror/internal/ctclient"
+	"github.com/ru-ct-mirror/ructmirror/internal/loglist"
+	"github.com/ru-ct-mirror/ructmirror/internal/mirror"
+	"github.com/ru-ct-mirror/ructmirror/internal/store"
 )
 
 const (

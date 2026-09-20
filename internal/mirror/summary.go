@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ru-ct-mirror/ru-ct-mirror/internal/store"
+	"github.com/ru-ct-mirror/ructmirror/internal/store"
 )
 
 // A run adds chunk files and never rewrites one, so the files a commit adds are

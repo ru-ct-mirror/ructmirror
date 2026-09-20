@@ -5,7 +5,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/ru-ct-mirror/ru-ct-mirror/internal/store"
+	"github.com/ru-ct-mirror/ructmirror/internal/store"
 )
 
 // DomainStat summarises the certificates seen for one DNS name.
