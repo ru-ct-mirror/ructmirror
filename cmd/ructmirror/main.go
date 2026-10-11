@@ -77,15 +77,23 @@ func main() {
 	defer stop()
 
 	var failures, alerts int
+	// failed names what each operational error was about, so the last line
+	// of a run says which shards it is blind to without reading the log.
+	var failed []string
 	switch os.Args[1] {
 	case "sync":
 		cl, err := ctclient.New(filepath.Join(*root, "roots"))
 		fatal(err)
+		cl.Log = os.Stderr
 		if *only == "" {
 			drift, err := snapshotLogList(ctx, cl, cfg, *root)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, err)
-				failures++
+				// Drift comes back as the error too; count it once, as an alert.
+				if !drift {
+					failures++
+					failed = append(failed, "log list")
+				}
 			}
 			if drift {
 				alerts++
@@ -105,6 +113,7 @@ func main() {
 					alerts++
 				} else {
 					failures++
+					failed = append(failed, l.Name())
 				}
 				continue
 			}
@@ -187,10 +196,14 @@ func main() {
 	}
 	switch {
 	case alerts > 0:
-		fmt.Fprintf(os.Stderr, "%d verification failure(s), %d other error(s)\n", alerts, failures)
+		fmt.Fprintf(os.Stderr, "%d verification failure(s), %d other error(s)", alerts, failures)
+		if len(failed) > 0 {
+			fmt.Fprintf(os.Stderr, ": %s", strings.Join(failed, ", "))
+		}
+		fmt.Fprintln(os.Stderr)
 		os.Exit(2)
 	case failures > 0:
-		fmt.Fprintf(os.Stderr, "%d error(s)\n", failures)
+		fmt.Fprintf(os.Stderr, "%d error(s): %s\n", failures, strings.Join(failed, ", "))
 		os.Exit(1)
 	}
 }
@@ -202,7 +215,8 @@ func snapshotLogList(ctx context.Context, cl *ctclient.Client, cfg *config.File,
 	if cfg.LogListURL == "" {
 		return false, nil
 	}
-	ctx, cancel := context.WithTimeout(ctx, time.Minute)
+	// Room for the client's whole backoff window, about two minutes.
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
 	b, err := cl.GetJSON(ctx, cfg.LogListURL)
 	if err != nil {

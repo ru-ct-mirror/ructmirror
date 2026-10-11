@@ -9,10 +9,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	ct "github.com/google/certificate-transparency-go"
@@ -23,11 +27,31 @@ import (
 const userAgent = "ru-ct-mirror (+https://github.com/ru-ct-mirror/ru-ct-mirror)"
 
 // Client talks to CT logs, choosing trust anchors per log.
+//
+// A request that fails with a 5xx, a 429, a transport error or a body that is
+// not JSON is retried up to Retries times. The wait before retry n is
+// Backoff·2^(n-1), with ±20% jitter so shards on one host do not retry in
+// step, raised to the server's Retry-After when it asks for longer, and never
+// more than MaxBackoff. A 4xx other than 429 is the log's answer and is
+// returned at once.
+//
+// A host that exhausted every retry on a 5xx or a transport error is marked
+// down for the rest of the Client's life: later requests to it make a single
+// attempt, and any answer below 500 clears the mark. The six yearly shards of
+// one operator share a host, so without this one outage costs six full
+// backoff windows; with it the first shard waits and the rest only check.
 type Client struct {
-	system  *http.Client
-	russian *http.Client
-	Retries int
-	Backoff time.Duration
+	system     *http.Client
+	russian    *http.Client
+	Retries    int
+	Backoff    time.Duration
+	MaxBackoff time.Duration
+	// Log, when set, receives one line per retry and per request cut short
+	// by a host marked down.
+	Log io.Writer
+
+	mu   sync.Mutex
+	down map[string]bool
 }
 
 // New builds a client. rootsDir holds PEM files: names containing "root" are
@@ -90,8 +114,11 @@ func New(rootsDir string) (*Client, error) {
 	return &Client{
 		system:  mk(nil),
 		russian: mk(pinned),
-		Retries: 5,
-		Backoff: 2 * time.Second,
+		// 2+4+8+16+32+60 s: about two minutes per request before giving up.
+		Retries:    6,
+		Backoff:    2 * time.Second,
+		MaxBackoff: time.Minute,
+		down:       map[string]bool{},
 	}, nil
 }
 
@@ -102,48 +129,150 @@ func (c *Client) httpFor(l config.Log) *http.Client {
 	return c.system
 }
 
-// Get fetches url+path with retries and decodes JSON into out.
+// get fetches l.URL+path with retries and decodes JSON into out.
 func (c *Client) get(ctx context.Context, l config.Log, path string, out any) error {
-	url := l.URL + path
-	var last error
-	for attempt := 0; attempt <= c.Retries; attempt++ {
+	u := l.URL + path
+	return c.do(ctx, c.httpFor(l), u, 64<<20, func(body []byte) error {
+		if err := json.Unmarshal(body, out); err != nil {
+			return fmt.Errorf("GET %s: bad JSON: %w", u, err)
+		}
+		return nil
+	})
+}
+
+// do GETs u with the retry policy described on Client and hands a 200 body,
+// read up to limit bytes, to accept. An error from accept is retried like a
+// server error, since a truncated or garbled response is usually transient.
+func (c *Client) do(ctx context.Context, hc *http.Client, u string, limit int64, accept func([]byte) error) error {
+	var host string
+	if pu, err := url.Parse(u); err == nil {
+		host = pu.Host
+	}
+	retries := c.Retries
+	if c.isDown(host) {
+		retries = 0
+		c.logf("%s did not answer earlier in this run; trying %s once\n", host, u)
+	}
+	var (
+		last error
+		wait time.Duration
+		// hostFault is true when the last failure says nothing came back
+		// from the host that it meant: no response, a 5xx or a 429.
+		hostFault bool
+	)
+	for attempt := 0; attempt <= retries; attempt++ {
 		if attempt > 0 {
+			c.logf("retry %d/%d in %s: %v\n", attempt, retries, wait.Round(100*time.Millisecond), last)
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(c.Backoff * time.Duration(attempt)):
+			case <-time.After(wait):
 			}
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 		if err != nil {
 			return err
 		}
 		req.Header.Set("User-Agent", userAgent)
-		resp, err := c.httpFor(l).Do(req)
+		resp, err := hc.Do(req)
 		if err != nil {
-			last = err
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			last, hostFault = err, true
+			wait = c.delay(attempt, "", time.Now())
 			continue
 		}
-		body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+		body, err := io.ReadAll(io.LimitReader(resp.Body, limit))
 		resp.Body.Close()
 		if err != nil {
-			last = err
+			last, hostFault = err, true
+			wait = c.delay(attempt, "", time.Now())
 			continue
 		}
+		if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
+			last = fmt.Errorf("GET %s: HTTP %d: %.200s", u, resp.StatusCode, body)
+			hostFault = true
+			wait = c.delay(attempt, resp.Header.Get("Retry-After"), time.Now())
+			continue
+		}
+		// Anything below 500 is the host answering.
+		c.setDown(host, false)
 		if resp.StatusCode != http.StatusOK {
-			last = fmt.Errorf("GET %s: HTTP %d: %.200s", url, resp.StatusCode, body)
-			if resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests {
-				return last
-			}
-			continue
+			return fmt.Errorf("GET %s: HTTP %d: %.200s", u, resp.StatusCode, body)
 		}
-		if err := json.Unmarshal(body, out); err != nil {
-			last = fmt.Errorf("GET %s: bad JSON: %w", url, err)
+		if err := accept(body); err != nil {
+			last, hostFault = err, false
+			wait = c.delay(attempt, "", time.Now())
 			continue
 		}
 		return nil
 	}
-	return fmt.Errorf("GET %s failed after %d attempts: %w", url, c.Retries+1, last)
+	if hostFault {
+		c.setDown(host, true)
+	}
+	return fmt.Errorf("GET %s failed after %d attempts: %w", u, retries+1, last)
+}
+
+// delay is the wait after failed attempt number attempt (0-based) before the
+// next one. retryAfter is the response's Retry-After header, if any.
+func (c *Client) delay(attempt int, retryAfter string, now time.Time) time.Duration {
+	d := c.Backoff
+	for i := 0; i < attempt && (c.MaxBackoff <= 0 || d < c.MaxBackoff); i++ {
+		d *= 2
+	}
+	if c.MaxBackoff > 0 && d > c.MaxBackoff {
+		d = c.MaxBackoff
+	}
+	d += time.Duration(float64(d) * (rand.Float64()*0.4 - 0.2))
+	if ra := parseRetryAfter(retryAfter, now); ra > d {
+		d = ra
+	}
+	if c.MaxBackoff > 0 && d > c.MaxBackoff {
+		d = c.MaxBackoff
+	}
+	return d
+}
+
+// parseRetryAfter reads a Retry-After value, either delay-seconds or an
+// HTTP-date (RFC 9110 §10.2.3). It returns 0 for anything else.
+func parseRetryAfter(v string, now time.Time) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	if n, err := strconv.ParseUint(v, 10, 32); err == nil {
+		return time.Duration(n) * time.Second
+	}
+	if t, err := http.ParseTime(v); err == nil && t.After(now) {
+		return t.Sub(now)
+	}
+	return 0
+}
+
+func (c *Client) isDown(host string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.down[host]
+}
+
+func (c *Client) setDown(host string, down bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.down == nil {
+		c.down = map[string]bool{}
+	}
+	if down {
+		c.down[host] = true
+	} else {
+		delete(c.down, host)
+	}
+}
+
+func (c *Client) logf(format string, args ...any) {
+	if c.Log != nil {
+		fmt.Fprintf(c.Log, format, args...)
+	}
 }
 
 // GetSTH returns the raw get-sth response and its parsed form.
@@ -183,20 +312,14 @@ func (c *Client) GetConsistency(ctx context.Context, l config.Log, first, second
 	return resp.Consistency, nil
 }
 
-// GetJSON fetches an arbitrary URL with the system trust store (used for ctlog.json).
-func (c *Client) GetJSON(ctx context.Context, url string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", userAgent)
-	resp, err := c.system.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET %s: HTTP %d", url, resp.StatusCode)
-	}
-	return io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+// GetJSON fetches an arbitrary URL with the system trust store (used for
+// ctlog.json), with the same retries as the log endpoints. The body is
+// returned as served; checking it is JSON is left to the caller.
+func (c *Client) GetJSON(ctx context.Context, u string) ([]byte, error) {
+	var out []byte
+	err := c.do(ctx, c.system, u, 8<<20, func(body []byte) error {
+		out = body
+		return nil
+	})
+	return out, err
 }
