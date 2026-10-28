@@ -2,12 +2,11 @@
 package loglist
 
 import (
-	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 	"net/url"
+	"sort"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/google/certificate-transparency-go/loglist3"
@@ -32,6 +31,10 @@ type Diff struct {
 	// Candidates holds the logs behind Unknown, in the same order, with what
 	// Adopt needs to decide whether to take them on.
 	Candidates []Candidate
+	// MissingOperators lists operators named in logs.json "operators" that
+	// the list does not carry at all. A whole operator vanishing is not how
+	// shards retire, so such a list must not be read as retiring them.
+	MissingOperators []string
 	// Version and Published identify the list the diff was taken against.
 	Version   string
 	Published time.Time
@@ -64,14 +67,43 @@ func Compare(ctlogJSON []byte, cfg *config.File) (Diff, error) {
 	if err != nil {
 		return d, fmt.Errorf("parsing ctlog.json: %w", err)
 	}
+	// NewFromJSON only unmarshals: {} or an error object parses as a list
+	// with no logs, and every shard we hold would then read as dropped.
+	n := 0
+	for _, op := range ll.Operators {
+		if op != nil {
+			n += len(op.Logs)
+		}
+	}
+	if n == 0 {
+		return d, fmt.Errorf("ctlog.json lists no logs")
+	}
 	d.Version, d.Published = ll.Version, ll.LogListTimestamp
+	present := map[string]bool{}
+	for _, op := range ll.Operators {
+		if op != nil {
+			present[op.Name] = true
+		}
+	}
+	for name := range cfg.Operators {
+		if !present[name] {
+			d.MissingOperators = append(d.MissingOperators, name)
+		}
+	}
+	sort.Strings(d.MissingOperators)
 	listed := map[string]bool{}
 	byURL := map[string]config.Log{}
 	for _, l := range cfg.Logs {
 		byURL[l.URL] = l
 	}
 	for _, op := range ll.Operators {
+		if op == nil {
+			continue
+		}
 		for _, l := range op.Logs {
+			if l == nil {
+				continue
+			}
 			key := base64.StdEncoding.EncodeToString(l.Key)
 			id := base64.StdEncoding.EncodeToString(l.LogID)
 			listed[l.URL] = true
@@ -164,18 +196,14 @@ func adoptOne(c Candidate, cfg *config.File, taken map[string]bool, source strin
 	if taken[l.Name()] {
 		return config.Log{}, fmt.Sprintf("shard name %s is already taken", l.Name())
 	}
-	der, err := base64.StdEncoding.DecodeString(c.Key)
-	if err != nil || len(der) == 0 {
-		return config.Log{}, "no usable key"
+	if c.Key == "" {
+		return config.Log{}, "no key"
 	}
-	if id := sha256.Sum256(der); base64.StdEncoding.EncodeToString(id[:]) != c.LogID {
-		return config.Log{}, "log_id is not sha256(key)"
-	}
-	if c.MMDSeconds < 0 {
-		return config.Log{}, "negative mmd"
-	}
-	if !strings.HasSuffix(l.URL, "/") {
-		return config.Log{}, "url does not end with /"
+	// Whatever is adopted is written to logs.json, so it must pass the same
+	// checks Load applies (key, log_id, mmd bounds, url): one candidate that
+	// Save would refuse must not cost the run every other change.
+	if err := (&config.File{Logs: []config.Log{l}}).Validate(); err != nil {
+		return config.Log{}, err.Error()
 	}
 	return l, ""
 }

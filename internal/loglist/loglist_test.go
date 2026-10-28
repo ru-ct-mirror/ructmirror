@@ -149,3 +149,42 @@ func TestCompareReportsDroppedShards(t *testing.T) {
 		t.Fatalf("a dropped shard must not hide the unknown one: %+v", d)
 	}
 }
+
+// A response that parses but lists nothing, such as {} or an error object,
+// must not read as every shard having been dropped.
+func TestCompareRefusesAListWithNoLogs(t *testing.T) {
+	for _, body := range []string{`{}`, `null`, `{"error":"rate limited"}`, `{"operators":[]}`,
+		`{"operators":[{"name":"Yandex","logs":[]}]}`} {
+		if _, err := Compare([]byte(body), adoptCfg()); err == nil {
+			t.Errorf("%s: accepted", body)
+		}
+	}
+}
+
+func TestCompareReportsMissingOperators(t *testing.T) {
+	cfg := adoptCfg()
+	cfg.Operators["VK LLC"] = config.Operator{Operator: "vk", TLS: config.TLSSystem, Hosts: []string{".mail.ru"}}
+	d, err := Compare([]byte(sample), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.MissingOperators) != 1 || d.MissingOperators[0] != "VK LLC" {
+		t.Fatalf("want VK LLC missing, got %v", d.MissingOperators)
+	}
+}
+
+// Adopt must not hand back an entry Save would refuse: one such candidate
+// would otherwise cost the run every other change to logs.json.
+func TestAdoptRejectsWhatLoadWouldRefuse(t *testing.T) {
+	c := Candidate{Operator: "Yandex", URL: "https://a.example/2/", Key: keyB, LogID: idB, MMDSeconds: 30 * 24 * 3600,
+		Start: time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC), Status: loglist3.UsableLogStatus}
+	added, rejected := Adopt(Diff{Candidates: []Candidate{c}}, adoptCfg())
+	if len(added) != 0 || len(rejected) != 1 {
+		t.Fatalf("an MMD of 30 days was adopted: %+v", added)
+	}
+	c.MMDSeconds = 86400
+	c.URL = "https://a.example/2"
+	if added, _ := Adopt(Diff{Candidates: []Candidate{c}}, adoptCfg()); len(added) != 0 {
+		t.Fatalf("a url without a trailing slash was adopted: %+v", added)
+	}
+}

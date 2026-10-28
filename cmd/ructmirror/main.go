@@ -260,6 +260,10 @@ func snapshotLogList(ctx context.Context, cl *ctclient.Client, cfg *config.File,
 	trusted := len(d.Changed) == 0 && len(d.Retimed) == 0
 	rejected := d.Unknown
 	changed := false
+	// Work on a copy: cfg changes only once logs.json holds the change, so a
+	// run never syncs a shard the file it commits does not name.
+	next := *cfg
+	next.Logs = append([]config.Log(nil), cfg.Logs...)
 	// A shard that cannot be judged stays as it is; it must not cost the
 	// other shards their adoption or retirement.
 	var judged []error
@@ -267,14 +271,22 @@ func snapshotLogList(ctx context.Context, cl *ctclient.Client, cfg *config.File,
 		var added []config.Log
 		added, rejected = loglist.Adopt(d, cfg)
 		for _, l := range added {
-			cfg.Logs = append(cfg.Logs, l)
+			next.Logs = append(next.Logs, l)
 			changed = true
 			fmt.Fprintf(os.Stderr, "log list: adopted %s (%s) from ctlog.json v%s (%s)\n",
 				l.Name(), l.URL, d.Version, d.Published.UTC().Format("2006-01-02"))
 		}
 		dropped = map[string]uint64{}
+		if len(d.MissingOperators) > 0 {
+			fmt.Fprintf(os.Stderr, "log list: ctlog.json carries no logs at all for %s; retiring nothing this run\n",
+				strings.Join(d.MissingOperators, ", "))
+		}
 		for _, name := range d.Dropped {
-			retired, valid, err := retireIfExpired(cfg, name, root, d, now)
+			if len(d.MissingOperators) > 0 {
+				dropped[name] = 0
+				continue
+			}
+			retired, valid, err := retireIfExpired(&next, name, root, d, now)
 			if err != nil {
 				judged = append(judged, fmt.Errorf("log list: cannot tell whether %s is finished: %w", name, err))
 				continue
@@ -287,9 +299,10 @@ func snapshotLogList(ctx context.Context, cl *ctclient.Client, cfg *config.File,
 		}
 	}
 	if changed {
-		if err := cfg.Save(filepath.Join(root, "logs.json")); err != nil {
+		if err := next.Save(filepath.Join(root, "logs.json")); err != nil {
 			return nil, false, fmt.Errorf("log list: %w", err)
 		}
+		*cfg = next
 	}
 
 	if len(rejected) == 0 && len(d.Changed) == 0 && len(d.Retimed) == 0 {
@@ -341,6 +354,11 @@ func retireIfExpired(cfg *config.File, name, root string, d loglist.Diff, now ti
 	st, err := store.Open(dir)
 	if err != nil {
 		return false, 0, err
+	}
+	// Once disabled, the shard is never fetched again, so its stored tree
+	// must be the one the log signed before the mirror stops looking.
+	if err := mirror.Verify(l, st); err != nil {
+		return false, 0, fmt.Errorf("stored tree does not verify: %w", err)
 	}
 	state, _, err := st.LoadState()
 	if err != nil {
