@@ -48,3 +48,65 @@ func TestLoadRejectsBadLogID(t *testing.T) {
 		t.Fatal("mismatched log_id accepted")
 	}
 }
+
+// The mirror rewrites logs.json when it adopts or retires a shard, so Save
+// must reproduce a file it did not change byte for byte: anything else would
+// bury the one line that matters in a reformatting diff.
+func TestSaveRoundTripsTheRealFile(t *testing.T) {
+	src := filepath.Join("testdata", "logs.json")
+	f, err := Load(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Operators) != 3 {
+		t.Fatalf("want 3 operators, got %d", len(f.Operators))
+	}
+	dst := filepath.Join(t.TempDir(), "logs.json")
+	if err := f.Save(dst); err != nil {
+		t.Fatal(err)
+	}
+	want, _ := os.ReadFile(src)
+	got, _ := os.ReadFile(dst)
+	if string(got) != string(want) {
+		t.Fatalf("Save changed the file:\n%s", got)
+	}
+}
+
+func TestSaveRefusesAnInvalidFile(t *testing.T) {
+	f := &File{Logs: []Log{{Operator: "a", Shard: "1", URL: "https://x/", TLS: "bogus"}}}
+	if err := f.Save(filepath.Join(t.TempDir(), "logs.json")); err == nil {
+		t.Fatal("Save wrote a file Load would reject")
+	}
+}
+
+func TestLoadValidatesOperators(t *testing.T) {
+	for name, body := range map[string]string{
+		"no hosts":     `{"operators":{"X":{"operator":"x","tls":"system","hosts":[]}},"logs":[]}`,
+		"bad tls":      `{"operators":{"X":{"operator":"x","tls":"nope","hosts":["x.example"]}},"logs":[]}`,
+		"unsafe slug":  `{"operators":{"X":{"operator":"x/y","tls":"system","hosts":["x.example"]}},"logs":[]}`,
+		"missing slug": `{"operators":{"X":{"tls":"system","hosts":["x.example"]}},"logs":[]}`,
+	} {
+		p := filepath.Join(t.TempDir(), "logs.json")
+		os.WriteFile(p, []byte(body), 0o644)
+		if _, err := Load(p); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+func TestServesHost(t *testing.T) {
+	o := Operator{Hosts: []string{"ct-agate.yandex.net", ".mail.ru"}}
+	for host, want := range map[string]bool{
+		"ct-agate.yandex.net":   true,
+		"CT-Agate.Yandex.net":   true,
+		"ctlog2028.mail.ru":     true,
+		"mail.ru":               false, // ".mail.ru" names subdomains only
+		"evilmail.ru":           false,
+		"ct-agate.yandex.net.":  false,
+		"x.ct-agate.yandex.net": false,
+	} {
+		if got := o.ServesHost(host); got != want {
+			t.Errorf("%s: got %v, want %v", host, got, want)
+		}
+	}
+}
