@@ -188,3 +188,23 @@ func TestAdoptRejectsWhatLoadWouldRefuse(t *testing.T) {
 		t.Fatalf("a url without a trailing slash was adopted: %+v", added)
 	}
 }
+
+// An operator still named in the list but with no logs, or only null ones,
+// has vanished as surely as one that is not named at all.
+func TestCompareTreatsAnOperatorWithoutLogsAsMissing(t *testing.T) {
+	cfg := adoptCfg()
+	cfg.Operators["VK LLC"] = config.Operator{Operator: "vk", TLS: config.TLSSystem, Hosts: []string{".mail.ru"}}
+	for _, vk := range []string{`{"name":"VK LLC","email":["x@y"],"logs":[]}`, `{"name":"VK LLC","email":["x@y"],"logs":[null]}`} {
+		body := sample[:len(sample)-2] + "," + vk + "]}"
+		d, err := Compare([]byte(body), cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(d.MissingOperators) != 1 || d.MissingOperators[0] != "VK LLC" {
+			t.Errorf("%s: want VK LLC missing, got %v", vk, d.MissingOperators)
+		}
+	}
+	if _, err := Compare([]byte(`{"operators":[{"name":"Yandex","logs":[null]}]}`), cfg); err == nil {
+		t.Error("a list of only null logs was accepted")
+	}
+}

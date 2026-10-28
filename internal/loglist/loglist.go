@@ -69,22 +69,25 @@ func Compare(ctlogJSON []byte, cfg *config.File) (Diff, error) {
 	}
 	// NewFromJSON only unmarshals: {} or an error object parses as a list
 	// with no logs, and every shard we hold would then read as dropped.
+	// An operator counts as present only with at least one real log: one
+	// left in the list with "logs": [] has vanished just the same.
 	n := 0
+	present := map[string]bool{}
 	for _, op := range ll.Operators {
-		if op != nil {
-			n += len(op.Logs)
+		if op == nil {
+			continue
+		}
+		for _, l := range op.Logs {
+			if l != nil {
+				n++
+				present[op.Name] = true
+			}
 		}
 	}
 	if n == 0 {
 		return d, fmt.Errorf("ctlog.json lists no logs")
 	}
 	d.Version, d.Published = ll.Version, ll.LogListTimestamp
-	present := map[string]bool{}
-	for _, op := range ll.Operators {
-		if op != nil {
-			present[op.Name] = true
-		}
-	}
 	for name := range cfg.Operators {
 		if !present[name] {
 			d.MissingOperators = append(d.MissingOperators, name)
