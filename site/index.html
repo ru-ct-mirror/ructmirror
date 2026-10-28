@@ -69,6 +69,7 @@ VK и Минцифры. Список строится из независимо�
 const GROUP_LIMIT = 300, FLAT_LIMIT = 500, ROWS_IN_GROUP = 2000;
 // Registrable-domain rule: last two labels, or three when the last two are a
 // public suffix that many unrelated organisations sit under.
+// Keep SUFFIXES in step with groupSuffixes in code/internal/mirror/group.go.
 const SUFFIXES = new Set(['gov.ru','edu.ru','ac.ru','mil.ru','int.ru','com.ru','net.ru','org.ru','pp.ru',
   'msk.ru','spb.ru','msk.su','spb.su','nov.ru','ru.net','com.by','com.kz','org.xn--p1ai','com.xn--p1ai','net.xn--p1ai']);
 const COLS = ['domain','certs','precerts','first_seen','latest_not_after','issuers'];

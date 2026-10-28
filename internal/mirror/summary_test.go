@@ -39,7 +39,7 @@ func summarise(t *testing.T, root string, refs ...ChunkRef) *Summary {
 func render(t *testing.T, s *Summary) string {
 	t.Helper()
 	var b bytes.Buffer
-	if err := s.Render(&b, testNow, 100); err != nil {
+	if err := s.Render(&b, testNow, 100, 5); err != nil {
 		t.Fatal(err)
 	}
 	return b.String()
@@ -239,10 +239,10 @@ func TestRenderCapsNamesAndIsDeterministic(t *testing.T) {
 	root, ca := t.TempDir(), newTestCA(t)
 	var sans []string
 	for i := 0; i < 120; i++ {
-		sans = append(sans, fmt.Sprintf("host%03d.example.ru", i))
+		sans = append(sans, fmt.Sprintf("host%03d-example.ru", i))
 	}
 	ref := writeTestChunk(t, root, "vk/2026", 0, [][]byte{
-		ca.leaf(t, "host000.example.ru", sans, testExpiry),
+		ca.leaf(t, "host000-example.ru", sans, testExpiry),
 	})
 	s := summarise(t, root, ref)
 	first := render(t, s)
@@ -255,7 +255,7 @@ func TestRenderCapsNamesAndIsDeterministic(t *testing.T) {
 	if n := strings.Count(first, "+ host"); n != 100 {
 		t.Fatalf("listed %d names, want 100", n)
 	}
-	if strings.Contains(first, "host100.example.ru") {
+	if strings.Contains(first, "host100-example.ru") {
 		t.Fatal("a name beyond the cap was listed")
 	}
 }
@@ -345,5 +345,87 @@ func TestMarkFirstSeenReportsAnUnreadableChunk(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("MarkFirstSeen did not return: the dispatcher is stuck on a channel no worker is reading")
+	}
+}
+
+// foldingSummary builds a run whose tricolor.ru group is larger than the
+// per-domain cap: the apex, its wildcard, four names the mirror already holds
+// and four new ones, next to a small other.ru group and a name under gov.ru.
+func foldingSummary(t *testing.T) *Summary {
+	t.Helper()
+	root, ca := t.TempDir(), newTestCA(t)
+	var old []string
+	for i := 1; i <= 4; i++ {
+		old = append(old, fmt.Sprintf("old%d.tricolor.ru", i))
+	}
+	writeTestChunk(t, root, "vk/2026", 0, [][]byte{ca.leaf(t, old[0], old, testExpiry)})
+	sans := append([]string{"tricolor.ru", "*.tricolor.ru"}, old...)
+	for i := 1; i <= 4; i++ {
+		sans = append(sans, fmt.Sprintf("new%d.tricolor.ru", i))
+	}
+	ref := writeTestChunk(t, root, "yandex/2026", 0, [][]byte{
+		ca.leaf(t, "tricolor.ru", sans, testExpiry),
+		ca.leaf(t, "other.ru", []string{"other.ru", "x.other.ru", "y.other.ru"}, testExpiry),
+		ca.leaf(t, "*.rlw.gov.ru", []string{"*.rlw.gov.ru"}, testExpiry),
+	})
+	return summarise(t, root, ref)
+}
+
+func TestRenderFoldsLargeDomainGroup(t *testing.T) {
+	msg := render(t, foldingSummary(t))
+	want := `+ other.ru
++ x.other.ru
++ y.other.ru
++ *.rlw.gov.ru
++ tricolor.ru
++ *.tricolor.ru
++ new1.tricolor.ru
++ new2.tricolor.ru
++ new3.tricolor.ru
+  … and 5 other subdomains in *.tricolor.ru (1 new)
+`
+	if !strings.HasSuffix(msg, want) {
+		t.Fatalf("grouped list wrong:\n%s\nwant suffix:\n%s", msg, want)
+	}
+	for _, hidden := range []string{"new4.tricolor.ru", "old1.tricolor.ru"} {
+		if strings.Contains(msg, hidden) {
+			t.Fatalf("%s should be folded:\n%s", hidden, msg)
+		}
+	}
+	if strings.Contains(msg, "*.gov.ru") {
+		t.Fatalf("gov.ru must not become a group:\n%s", msg)
+	}
+	if !strings.Contains(msg, "14 names (10 new)") {
+		t.Fatalf("subject must count every name, folded or not:\n%s", msg)
+	}
+}
+
+func TestRenderFoldWithoutMarkers(t *testing.T) {
+	s := foldingSummary(t)
+	s.Marked = false
+	msg := render(t, s)
+	// Without markers the group is ordered by name after the apex and wildcard.
+	want := `  tricolor.ru
+  *.tricolor.ru
+  new1.tricolor.ru
+  new2.tricolor.ru
+  new3.tricolor.ru
+  … and 5 other subdomains in *.tricolor.ru
+`
+	if !strings.HasSuffix(msg, want) {
+		t.Fatalf("unmarked grouped list wrong:\n%s", msg)
+	}
+}
+
+func TestRenderNameCapCountsFoldedNames(t *testing.T) {
+	var b bytes.Buffer
+	if err := foldingSummary(t).Render(&b, testNow, 6, 5); err != nil {
+		t.Fatal(err)
+	}
+	msg := b.String()
+	// other.ru (3) and rlw.gov.ru (1) fit, then two of tricolor.ru; the other
+	// eight names are neither printed nor folded yet.
+	if !strings.HasSuffix(msg, "+ *.tricolor.ru\n… and 8 more names in the added chunks\n") {
+		t.Fatalf("cap wrong:\n%s", msg)
 	}
 }
