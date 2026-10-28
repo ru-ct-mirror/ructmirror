@@ -279,8 +279,11 @@ func dedupe(refs []ChunkRef) []ChunkRef {
 }
 
 // Render writes the commit message for s: a subject that stays parsable as
-// "sync <timestamp>", then the shards, then the names.
-func (s *Summary) Render(w io.Writer, now time.Time, maxNames int) error {
+// "sync <timestamp>", then the shards, then the names. At most maxNames names
+// are listed; names are grouped by registrable domain (GroupKey) and a group
+// shows at most maxPerDomain of them, the rest folded into one line. A limit
+// of zero or less disables it.
+func (s *Summary) Render(w io.Writer, now time.Time, maxNames, maxPerDomain int) error {
 	var b bytes.Buffer
 	newCount := 0
 	for _, n := range s.Names {
@@ -329,22 +332,100 @@ func (s *Summary) Render(w io.Writer, now time.Time, maxNames int) error {
 	} else {
 		b.WriteString("Names in the added chunks:\n\n")
 	}
-	for i, n := range s.Names {
-		if maxNames > 0 && i >= maxNames {
-			fmt.Fprintf(&b, "… and %d more names in the added chunks\n", len(s.Names)-i)
-			break
-		}
-		mark := "  "
-		if s.Marked && s.New[n] {
-			mark = "+ "
-		}
+	s.renderNames(&b, maxNames, maxPerDomain)
+	return write(w, &b)
+}
+
+// listedName is one name as the message shows it.
+type listedName struct {
+	name, display string
+	new           bool
+}
+
+// renderNames lists the names grouped by registrable domain. Inside a group the
+// apex and its wildcard come first, so a fold line never hides the domain
+// itself, then new names, then the rest, each by name. Only name lines count
+// towards maxNames; fold lines do not.
+func (s *Summary) renderNames(b *bytes.Buffer, maxNames, maxPerDomain int) {
+	groups := map[string][]listedName{}
+	var keys []string
+	total := 0
+	for _, n := range s.Names {
 		d := DisplayName(n)
 		if d == "" {
 			continue
 		}
-		b.WriteString(mark + d + "\n")
+		k := GroupKey(n)
+		if _, ok := groups[k]; !ok {
+			keys = append(keys, k)
+		}
+		groups[k] = append(groups[k], listedName{name: n, display: d, new: s.Marked && s.New[n]})
+		total++
 	}
-	return write(w, &b)
+	sort.Strings(keys)
+
+	accounted := 0 // names printed or folded so far
+	printed := 0
+	for _, k := range keys {
+		g := groups[k]
+		rank := func(n listedName) int {
+			switch {
+			case n.name == k:
+				return 0
+			case n.name == "*."+k:
+				return 1
+			case n.new:
+				return 2
+			}
+			return 3
+		}
+		sort.SliceStable(g, func(i, j int) bool {
+			ri, rj := rank(g[i]), rank(g[j])
+			if ri != rj {
+				return ri < rj
+			}
+			return g[i].name < g[j].name
+		})
+		shown := g
+		if maxPerDomain > 0 && len(g) > maxPerDomain {
+			shown = g[:maxPerDomain]
+		}
+		for _, n := range shown {
+			if maxNames > 0 && printed >= maxNames {
+				fmt.Fprintf(b, "… and %d more names in the added chunks\n", total-accounted)
+				return
+			}
+			mark := "  "
+			if n.new {
+				mark = "+ "
+			}
+			b.WriteString(mark + n.display + "\n")
+			printed++
+			accounted++
+		}
+		if hidden := g[len(shown):]; len(hidden) > 0 {
+			fresh := 0
+			for _, n := range hidden {
+				if n.new {
+					fresh++
+				}
+			}
+			fmt.Fprintf(b, "  … and %d other %s in *.%s", len(hidden),
+				pluralWord(len(hidden), "subdomain", "subdomains"), DisplayName(k))
+			if fresh > 0 {
+				fmt.Fprintf(b, " (%d new)", fresh)
+			}
+			b.WriteString("\n")
+			accounted += len(hidden)
+		}
+	}
+}
+
+func pluralWord(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
 
 func write(w io.Writer, b *bytes.Buffer) error {

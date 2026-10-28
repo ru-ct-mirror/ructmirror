@@ -45,7 +45,10 @@ const (
 	// fits, the summary drops the markers rather than the commit.
 	firstSeenTimeout = 2 * time.Minute
 	// maxSummaryNames is how many names one commit message lists.
-	maxSummaryNames = 100
+	maxSummaryNames = 200
+	// maxSummaryNamesPerDomain is how many names of one registrable domain the
+	// message lists before folding the rest into a single line.
+	maxSummaryNamesPerDomain = 5
 )
 
 func main() {
@@ -201,7 +204,7 @@ func main() {
 		// Render whole, then write once: a message that is half written and
 		// then fails is worse than no message at all.
 		var msg bytes.Buffer
-		fatal(s.Render(&msg, time.Now(), maxSummaryNames))
+		fatal(s.Render(&msg, time.Now(), maxSummaryNames, maxSummaryNamesPerDomain))
 		_, err = os.Stdout.Write(msg.Bytes())
 		fatal(err)
 	default:
