@@ -29,7 +29,16 @@ go build -C code -o ../ructmirror ./cmd/ructmirror
 
 `verify` needs no network: it re-hashes every stored entry, checks the root
 against `state.json` and the last STH, and checks that STH's signature.
-`sync` is the only subcommand that talks to the logs. Exit status is 0 when
+`sync` is the only subcommand that talks to the logs. It is also the only one
+that writes `logs.json`: when Yandex's `ctlog.json` lists a new shard of an
+operator named under `operators` in `logs.json`, on one of that operator's
+hosts, `sync` adopts it and mirrors it in the same run; when the list drops a
+shard and every certificate the mirror holds for it has expired, `sync` marks
+it `disabled` with a note. Each such change prints a `log list: adopted` or
+`log list: retired` line. A list that changes a known key or MMD changes
+nothing in `logs.json` and is reported as a verification failure, as is a new
+log that does not meet those conditions. With `-only` the list is not read.
+Exit status is 0 when
 everything verified, 2 when a log or the log list failed verification and
 evidence was written, and 1 for any other error.
 

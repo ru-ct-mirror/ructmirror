@@ -23,6 +23,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -85,8 +86,14 @@ func main() {
 		cl, err := ctclient.New(filepath.Join(*root, "roots"))
 		fatal(err)
 		cl.Log = os.Stderr
+		// dropped holds, for each shard ctlog.json no longer lists and that
+		// was not retired, how many of its certificates are still valid.
+		var dropped map[string]uint64
 		if *only == "" {
-			drift, err := snapshotLogList(ctx, cl, cfg, *root)
+			var drift bool
+			dropped, drift, err = snapshotLogList(ctx, cl, cfg, *root, time.Now())
+			// The list may have added or retired shards; sync what it holds now.
+			logs = cfg.Logs
 			if err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				// Drift comes back as the error too; count it once, as an alert.
@@ -114,6 +121,12 @@ func main() {
 				} else {
 					failures++
 					failed = append(failed, l.Name())
+					if valid, ok := dropped[l.Name()]; ok && hostNotFound(err) {
+						fmt.Fprintf(os.Stderr, "%s: host does not resolve and ctlog.json no longer lists this shard; "+
+							"%d of its certificates are still valid, so it is not retired automatically. "+
+							"Check the log by hand and mark it \"disabled\" in logs.json if it is gone (docs/OPERATIONS.md)\n",
+							l.Name(), valid)
+					}
 				}
 				continue
 			}
@@ -211,34 +224,86 @@ func main() {
 // snapshotLogList downloads ctlog.json into loglist/ and reports drift from
 // logs.json. drift is true when the published list disagrees with logs.json,
 // which is a verification failure rather than an operational error.
-func snapshotLogList(ctx context.Context, cl *ctclient.Client, cfg *config.File, root string) (drift bool, err error) {
+//
+// When the list holds nothing suspicious about the logs we already know, it
+// also brings logs.json up to date and saves it: a new shard of a known
+// operator is adopted (see loglist.Adopt), and a shard the list has dropped
+// is retired once every certificate it holds has expired. cfg is updated in
+// place. dropped maps each dropped shard that stays enabled to the number of
+// its certificates still valid at now.
+func snapshotLogList(ctx context.Context, cl *ctclient.Client, cfg *config.File, root string, now time.Time) (dropped map[string]uint64, drift bool, err error) {
 	if cfg.LogListURL == "" {
-		return false, nil
+		return nil, false, nil
 	}
 	// Room for the client's whole backoff window, about two minutes.
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
 	b, err := cl.GetJSON(ctx, cfg.LogListURL)
 	if err != nil {
-		return false, fmt.Errorf("log list: %w", err)
+		return nil, false, fmt.Errorf("log list: %w", err)
 	}
 	dir := filepath.Join(root, "loglist")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return false, err
+		return nil, false, err
 	}
 	if err := os.WriteFile(filepath.Join(dir, "ctlog.json"), b, 0o644); err != nil {
-		return false, err
+		return nil, false, err
 	}
 	d, err := loglist.Compare(b, cfg)
 	if err != nil {
-		return false, fmt.Errorf("log list: %w", err)
+		return nil, false, fmt.Errorf("log list: %w", err)
 	}
-	if d.Empty() {
+
+	// A list that changed a key or an MMD we hold is itself under suspicion;
+	// it decides nothing about which shards to watch until a maintainer has
+	// looked at it.
+	trusted := len(d.Changed) == 0 && len(d.Retimed) == 0
+	rejected := d.Unknown
+	changed := false
+	// A shard that cannot be judged stays as it is; it must not cost the
+	// other shards their adoption or retirement.
+	var judged []error
+	if trusted {
+		var added []config.Log
+		added, rejected = loglist.Adopt(d, cfg)
+		for _, l := range added {
+			cfg.Logs = append(cfg.Logs, l)
+			changed = true
+			fmt.Fprintf(os.Stderr, "log list: adopted %s (%s) from ctlog.json v%s (%s)\n",
+				l.Name(), l.URL, d.Version, d.Published.UTC().Format("2006-01-02"))
+		}
+		dropped = map[string]uint64{}
+		for _, name := range d.Dropped {
+			retired, valid, err := retireIfExpired(cfg, name, root, d, now)
+			if err != nil {
+				judged = append(judged, fmt.Errorf("log list: cannot tell whether %s is finished: %w", name, err))
+				continue
+			}
+			if retired {
+				changed = true
+				continue
+			}
+			dropped[name] = valid
+		}
+	}
+	if changed {
+		if err := cfg.Save(filepath.Join(root, "logs.json")); err != nil {
+			return nil, false, fmt.Errorf("log list: %w", err)
+		}
+	}
+
+	if len(rejected) == 0 && len(d.Changed) == 0 && len(d.Retimed) == 0 {
+		if len(judged) > 0 {
+			return dropped, false, errors.Join(judged...)
+		}
 		fmt.Fprintln(os.Stderr, "log list: ctlog.json agrees with logs.json")
-		return false, nil
+		return dropped, false, nil
+	}
+	for _, err := range judged {
+		fmt.Fprintln(os.Stderr, err)
 	}
 	var errs []error
-	for _, u := range d.Unknown {
+	for _, u := range rejected {
 		errs = append(errs, fmt.Errorf("ALERT log list: log not in logs.json: %s", u))
 	}
 	for _, c := range d.Changed {
@@ -247,7 +312,65 @@ func snapshotLogList(ctx context.Context, cl *ctclient.Client, cfg *config.File,
 	for _, r := range d.Retimed {
 		errs = append(errs, fmt.Errorf("ALERT log list: mmd changed: %s", r))
 	}
-	return true, errors.Join(errs...)
+	return dropped, true, errors.Join(errs...)
+}
+
+// retireIfExpired marks the named shard disabled in cfg when the mirror holds
+// a verified tree for it and every certificate in that tree has expired. It
+// reports whether it did, and otherwise how many certificates are still valid.
+// A shard that was never synced is left alone: there is nothing to keep, and
+// nothing to say it is finished.
+func retireIfExpired(cfg *config.File, name, root string, d loglist.Diff, now time.Time) (retired bool, valid uint64, err error) {
+	i := -1
+	for j, l := range cfg.Logs {
+		if l.Name() == name {
+			i = j
+		}
+	}
+	if i < 0 {
+		return false, 0, errors.New("not in logs.json")
+	}
+	l := cfg.Logs[i]
+	dir := filepath.Join(root, "data", l.Operator, l.Shard)
+	if _, err := os.Stat(filepath.Join(dir, "state.json")); err != nil {
+		if os.IsNotExist(err) {
+			return false, 0, nil
+		}
+		return false, 0, err
+	}
+	st, err := store.Open(dir)
+	if err != nil {
+		return false, 0, err
+	}
+	state, _, err := st.LoadState()
+	if err != nil {
+		return false, 0, err
+	}
+	ex, err := mirror.Expiry(st, now)
+	if err != nil {
+		return false, 0, err
+	}
+	if ex.Entries != state.TreeSize {
+		return false, 0, fmt.Errorf("%d entries on disk, state.json says %d", ex.Entries, state.TreeSize)
+	}
+	if !ex.AllExpired() {
+		return false, ex.Valid, nil
+	}
+	l.Disabled = true
+	l.Note = fmt.Sprintf("Retired automatically on %s: no longer in ctlog.json (v%s, %s) and all %d certificates expired by %s. Final tree: %d entries, STH of %s.",
+		now.UTC().Format("2006-01-02"), d.Version, d.Published.UTC().Format("2006-01-02"),
+		ex.Entries, ex.NotAfter.UTC().Format("2006-01-02"),
+		state.TreeSize, time.UnixMilli(int64(state.STHTimestamp)).UTC().Format("2006-01-02"))
+	cfg.Logs[i] = l
+	fmt.Fprintf(os.Stderr, "log list: retired %s: %s\n", name, l.Note)
+	return true, 0, nil
+}
+
+// hostNotFound reports whether err comes down to the log's host name not
+// resolving at all, as opposed to a host that answered badly or not in time.
+func hostNotFound(err error) bool {
+	var dns *net.DNSError
+	return errors.As(err, &dns) && dns.IsNotFound
 }
 
 func usage() {

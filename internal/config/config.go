@@ -2,6 +2,7 @@
 package config
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -34,19 +35,44 @@ const (
 
 // Log describes one CT log shard.
 type Log struct {
-	Operator    string  `json:"operator"`
-	Shard       string  `json:"shard"`
-	Description string  `json:"description"`
-	URL         string  `json:"url"`
-	LogID       string  `json:"log_id"`
-	Key         string  `json:"key"`
-	TLS         TLSMode `json:"tls"`
-	KeySource   string  `json:"key_source"`
+	Operator    string `json:"operator"`
+	Shard       string `json:"shard"`
+	Description string `json:"description"`
+	URL         string `json:"url"`
+	LogID       string `json:"log_id"`
+	Key         string `json:"key"`
 	// MMDSeconds is the log's declared maximum merge delay, copied from
 	// ctlog.json. Zero means unstated; use MMD rather than reading it.
-	MMDSeconds int64  `json:"mmd,omitempty"`
-	Disabled   bool   `json:"disabled,omitempty"`
-	Note       string `json:"note,omitempty"`
+	MMDSeconds int64   `json:"mmd,omitempty"`
+	TLS        TLSMode `json:"tls"`
+	KeySource  string  `json:"key_source"`
+	Disabled   bool    `json:"disabled,omitempty"`
+	Note       string  `json:"note,omitempty"`
+}
+
+// Operator tells the mirror how to take on a new shard that ctlog.json lists
+// under one operator's name. Only an operator named here can have shards
+// adopted without a maintainer, and only on the hosts it names.
+type Operator struct {
+	// Operator is the slug used in shard names and data/ paths.
+	Operator string `json:"operator"`
+	// TLS is the mode the operator's log servers need.
+	TLS TLSMode `json:"tls"`
+	// Hosts are the host names, or suffixes beginning with a dot, that the
+	// operator's logs are served from.
+	Hosts []string `json:"hosts"`
+}
+
+// ServesHost reports whether host is one of the operator's hosts.
+func (o Operator) ServesHost(host string) bool {
+	host = strings.ToLower(host)
+	for _, h := range o.Hosts {
+		h = strings.ToLower(h)
+		if host == h || (strings.HasPrefix(h, ".") && strings.HasSuffix(host, h)) {
+			return true
+		}
+	}
+	return false
 }
 
 // Name is the operator/shard pair used in paths and messages.
@@ -74,7 +100,10 @@ func (l Log) KeyDER() ([]byte, error) {
 // File is the top-level structure of logs.json.
 type File struct {
 	LogListURL string `json:"log_list_url"`
-	Logs       []Log  `json:"logs"`
+	// Operators maps an operator's name exactly as ctlog.json spells it to
+	// what adopting one of its shards needs.
+	Operators map[string]Operator `json:"operators,omitempty"`
+	Logs      []Log               `json:"logs"`
 }
 
 // Load reads and validates logs.json.
@@ -87,40 +116,84 @@ func Load(path string) (*File, error) {
 	if err := json.Unmarshal(b, &f); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
+	if err := f.Validate(); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return &f, nil
+}
+
+// Validate checks everything Load requires of a parsed file. Save calls it
+// too, so the mirror can never write a file it would refuse to read back.
+func (f *File) Validate() error {
+	for name, o := range f.Operators {
+		if o.Operator == "" || strings.ContainsAny(o.Operator, "/\\ ") {
+			return fmt.Errorf("operator %q: slug must be non-empty and path-safe", name)
+		}
+		switch o.TLS {
+		case TLSSystem, TLSRussianTrusted:
+		default:
+			return fmt.Errorf("operator %q: unknown tls mode %q", name, o.TLS)
+		}
+		if len(o.Hosts) == 0 {
+			return fmt.Errorf("operator %q: no hosts", name)
+		}
+	}
 	seen := map[string]bool{}
 	for _, l := range f.Logs {
 		if l.Operator == "" || l.Shard == "" || l.URL == "" {
-			return nil, fmt.Errorf("%s: log %q lacks operator, shard or url", path, l.Description)
+			return fmt.Errorf("log %q lacks operator, shard or url", l.Description)
 		}
 		if strings.ContainsAny(l.Operator+l.Shard, "/\\ ") {
-			return nil, fmt.Errorf("%s: %s: operator/shard must be path-safe", path, l.Name())
+			return fmt.Errorf("%s: operator/shard must be path-safe", l.Name())
 		}
 		if !strings.HasSuffix(l.URL, "/") {
-			return nil, fmt.Errorf("%s: %s: url must end with /", path, l.Name())
+			return fmt.Errorf("%s: url must end with /", l.Name())
 		}
 		if seen[l.Name()] {
-			return nil, fmt.Errorf("%s: duplicate log %s", path, l.Name())
+			return fmt.Errorf("duplicate log %s", l.Name())
 		}
 		seen[l.Name()] = true
 		if l.MMDSeconds < 0 || l.MMDSeconds > maxMMDSeconds {
-			return nil, fmt.Errorf("%s: %s: mmd must be between 0 and %d seconds, got %d",
-				path, l.Name(), maxMMDSeconds, l.MMDSeconds)
+			return fmt.Errorf("%s: mmd must be between 0 and %d seconds, got %d",
+				l.Name(), maxMMDSeconds, l.MMDSeconds)
 		}
 		switch l.TLS {
 		case TLSSystem, TLSRussianTrusted:
 		default:
-			return nil, fmt.Errorf("%s: %s: unknown tls mode %q", path, l.Name(), l.TLS)
+			return fmt.Errorf("%s: unknown tls mode %q", l.Name(), l.TLS)
 		}
 		der, err := l.KeyDER()
 		if err != nil {
-			return nil, fmt.Errorf("%s: %s: bad key: %w", path, l.Name(), err)
+			return fmt.Errorf("%s: bad key: %w", l.Name(), err)
 		}
 		if der != nil {
 			id := sha256.Sum256(der)
 			if got := base64.StdEncoding.EncodeToString(id[:]); got != l.LogID {
-				return nil, fmt.Errorf("%s: %s: log_id %s does not match sha256(key) %s", path, l.Name(), l.LogID, got)
+				return fmt.Errorf("%s: log_id %s does not match sha256(key) %s", l.Name(), l.LogID, got)
 			}
 		}
 	}
-	return &f, nil
+	return nil
+}
+
+// Save writes f to path in the layout logs.json is kept in: two-space
+// indent, no HTML escaping, a trailing newline. A file loaded and saved
+// unchanged comes back byte for byte, so a run that adopts or retires a
+// shard leaves a diff that shows only that.
+func (f *File) Save(path string) error {
+	if err := f.Validate(); err != nil {
+		return fmt.Errorf("%s: refusing to write: %w", path, err)
+	}
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetIndent("", "  ")
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(f); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b.Bytes(), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
